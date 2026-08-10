@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, globalShortcut } from 'electron';
+import { app, BrowserWindow, ipcMain, globalShortcut, Tray, Menu, nativeImage, session } from 'electron';
 import path from 'node:path';
 import started from 'electron-squirrel-startup';
 
@@ -6,17 +6,42 @@ if (started) {
   app.quit();
 }
 
+// Fix disk cache path to prevent cache corruption that breaks Web Speech API networking
+app.setPath('userData', path.join(app.getPath('appData'), 'VoiceDeck'));
+
+// Enable Web Speech API + microphone access in Electron
+app.commandLine.appendSwitch('enable-features', 'MediaFoundationAudioCapture,WebSpeechAPI');
+app.commandLine.appendSwitch('allow-running-insecure-content');
+app.commandLine.appendSwitch('disable-features', 'AutoupgradeMixedContent');
+
 let mainWindow: BrowserWindow | null = null;
-let isAltDown = false;
+let tray: Tray | null = null;
+
+declare global {
+  namespace Electron {
+    interface App {
+      isQuitting: boolean;
+    }
+  }
+}
+app.isQuitting = false;
 
 const createWindow = () => {
   mainWindow = new BrowserWindow({
-    width: 400,
-    height: 600,
+    width: 420,
+    height: 680,
+    minWidth: 380,
+    minHeight: 600,
+    frame: false,       // Frameless for premium feel
+    transparent: false,
+    backgroundColor: '#0f0f13',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
     },
     autoHideMenuBar: true,
+    title: 'VoiceDeck',
   });
 
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
@@ -26,33 +51,61 @@ const createWindow = () => {
       path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`),
     );
   }
+
+  // Grant microphone permission automatically
+  mainWindow.webContents.session.setPermissionRequestHandler((webContents, permission, callback) => {
+    if (permission === 'media') {
+      callback(true);
+    } else {
+      callback(false);
+    }
+  });
+
+  // Prevent closing — hide to tray instead
+  mainWindow.on('close', (event) => {
+    if (!app.isQuitting) {
+      event.preventDefault();
+      mainWindow?.hide();
+    }
+    return false;
+  });
+};
+
+const createTray = () => {
+  const icon = nativeImage.createEmpty();
+  tray = new Tray(icon);
+  
+  const updateMenu = () => Menu.buildFromTemplate([
+    { label: 'VoiceDeck', enabled: false },
+    { type: 'separator' },
+    { label: 'Abrir Painel', click: () => mainWindow?.show() },
+    { type: 'separator' },
+    { 
+      label: 'Sair', 
+      click: () => {
+        app.isQuitting = true;
+        app.quit();
+      }
+    }
+  ]);
+  
+  tray.setToolTip('VoiceDeck');
+  tray.setContextMenu(updateMenu());
+  
+  tray.on('click', () => {
+    mainWindow?.isVisible() ? mainWindow?.hide() : mainWindow?.show();
+  });
 };
 
 const registerHotkeys = () => {
-  // Push-to-Talk (ALT)
-  // Electron globalShortcut doesn't natively distinguish KeyDown and KeyUp perfectly for modifiers.
-  // Wait, actually `globalShortcut` only triggers on key down. To detect key up globally in Windows,
-  // we might need an external module or a polling workaround for MVP. 
-  // Let's use a workaround or try to bind 'Alt' and check state, or use standard letters for now to test.
-  
-  // For the MVP, we will just simulate it by sending a toggle event or we can use another library later.
-  // Actually, let's map it to something simpler for testing, or we can just send "start" on press.
-  // We'll leave it as a placeholder and send events.
-  
-  // A better way to handle push-to-talk in Electron without native keyup events is using `uIOhook`
-  // but since we want to avoid C++ compiles, we can use a small hack or bind two keys (e.g., F9 to toggle).
-  // Let's bind 'CommandOrControl+Space' as a toggle for now, and later we can implement real Push-To-Talk with Alt.
-  
-  globalShortcut.register('CommandOrControl+Space', () => {
-    isAltDown = !isAltDown;
-    if (mainWindow) {
-      mainWindow.webContents.send('hotkey-state', isAltDown);
-    }
-  });
+  // Ctrl+Space as toggle push-to-talk (will-improve with J key in renderer)
+  // We don't register anything global for now since the J key works per-window
+  // and avoids conflicts while gaming. This keeps it simple.
 };
 
 app.on('ready', () => {
   createWindow();
+  createTray();
   registerHotkeys();
 
   // Spotify Auth IPC
@@ -60,17 +113,19 @@ app.on('ready', () => {
     return new Promise((resolve, reject) => {
       const authWindow = new BrowserWindow({
         width: 500,
-        height: 600,
+        height: 620,
         show: true,
         webPreferences: {
           nodeIntegration: false,
+          contextIsolation: true,
         }
       });
 
       authWindow.loadURL(authUrl);
 
-      authWindow.webContents.on('will-redirect', (event, url) => {
-        if (url.startsWith('http://localhost:1420/callback')) {
+      const handleRedirect = (event: Electron.Event, url: string) => {
+        if (url.startsWith('http://127.0.0.1:1420/callback')) {
+          event.preventDefault();
           const rawCode = new URL(url).searchParams.get('code');
           const error = new URL(url).searchParams.get('error');
 
@@ -79,21 +134,30 @@ app.on('ready', () => {
           } else {
             reject(error || 'Unknown error');
           }
-          authWindow.close();
+          
+          // Remove listeners before closing to avoid double-reject
+          authWindow.webContents.removeListener('will-redirect', handleRedirect as any);
+          authWindow.webContents.removeListener('will-navigate', handleRedirect as any);
+          authWindow.destroy();
         }
-      });
+      };
+
+      authWindow.webContents.on('will-redirect', handleRedirect);
+      authWindow.webContents.on('will-navigate', handleRedirect);
 
       authWindow.on('closed', () => {
         reject('User closed window');
       });
     });
   });
+
+  // IPC for window controls (frameless)
+  ipcMain.on('window-minimize', () => mainWindow?.minimize());
+  ipcMain.on('window-close', () => mainWindow?.hide());
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  // Do nothing — keep app alive in tray
 });
 
 app.on('will-quit', () => {

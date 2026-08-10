@@ -7,5 +7,7 @@ contextBridge.exposeInMainWorld('electron', {
   },
   removeAllListeners: () => {
     ipcRenderer.removeAllListeners('hotkey-state');
-  }
+  },
+  minimize: () => ipcRenderer.send('window-minimize'),
+  closeWindow: () => ipcRenderer.send('window-close'),
 });
