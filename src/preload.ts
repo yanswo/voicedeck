@@ -1,13 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('electron', {
-  spotifyAuth: (authUrl: string) => ipcRenderer.invoke('spotify-auth', authUrl),
-  onHotkey: (callback: (isDown: boolean) => void) => {
-    ipcRenderer.on('hotkey-state', (_event, isDown) => callback(isDown));
+  spotifyAuth:      (url: string) => ipcRenderer.invoke('spotify-auth', url),
+  loadWhisper:      () => ipcRenderer.invoke('load-whisper'),
+  transcribe:       (buffer: ArrayBuffer) => ipcRenderer.invoke('transcribe', buffer),
+  onWhisperProgress:(cb: (info: any) => void) => {
+    ipcRenderer.on('whisper-progress', (_e, info) => cb(info));
   },
-  removeAllListeners: () => {
-    ipcRenderer.removeAllListeners('hotkey-state');
-  },
-  minimize: () => ipcRenderer.send('window-minimize'),
-  closeWindow: () => ipcRenderer.send('window-close'),
+  minimize:     () => ipcRenderer.send('window-minimize'),
+  closeWindow:  () => ipcRenderer.send('window-close'),
 });
